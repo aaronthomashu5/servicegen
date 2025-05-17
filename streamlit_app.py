@@ -1,426 +1,230 @@
 import streamlit as st
-import pymongo
+import atexit
 import datetime
-import time
-import threading
 import os
-import gridfs
 from bson.objectid import ObjectId
-from typing import Dict, Any, Optional
+from utils.helpers import init_session_state, create_sidebar, cleanup, navigate_to_page
+from database.connection import customers
 
-# MongoDB connection setup
-def get_mongo_client():
-    """Create and return a MongoDB client using connection string."""
-    connection_string = os.environ.get("MONGO_CONNECTION_STRING", "mongodb://localhost:27017/")
-    return pymongo.MongoClient(connection_string)
+# Import all page modules
+from pages import crm_entry, vendor_registration, mrn_creation, service_report, telecontroller, customer_view
 
-# Initialize MongoDB client and database
-client = get_mongo_client()
-db = client.service_workflow
-fs = gridfs.GridFS(db)  # For file storage with GridFS
+# Load custom CSS
+def load_css():
+    css_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.streamlit', 'style.css')
+    if os.path.exists(css_file):
+        with open(css_file) as f:
+            st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
 
-# Collections
-customers = db.customers
-mrns = db.mrns
-service_reports = db.service_reports
+# Register cleanup handler
+atexit.register(cleanup)
 
-# Initialize session state variables if not already present
-if "page" not in st.session_state:
-    st.session_state.page = 1
+# Initialize session state
+init_session_state()
 
-if "customer_id" not in st.session_state:
-    st.session_state.customer_id = None
+# Page title and sidebar
+st.set_page_config(
+    page_title="Pofisian Service Workflow",
+    page_icon="🔧",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-if "mrn_code" not in st.session_state:
-    st.session_state.mrn_code = None
+# Load custom CSS
+load_css()
 
-if "sr_code" not in st.session_state:
-    st.session_state.sr_code = None
+# Create sidebar
+create_sidebar()
 
-if "autosave_timer" not in st.session_state:
-    st.session_state.autosave_timer = None
-
-if "last_input_time" not in st.session_state:
-    st.session_state.last_input_time = time.time()
-
-# Function to navigate between pages
-def navigate_to_page(page_num: int):
-    """Set the current page in session state."""
-    st.session_state.page = page_num
-
-# Autosave functionality
-def reset_autosave_timer(callback, *args, **kwargs):
-    """Reset the autosave timer."""
-    if st.session_state.autosave_timer:
-        st.session_state.autosave_timer.cancel()
+# Routing to the correct page
+if st.session_state.page == "home":
+    # Display current date in the top right
+    current_date = datetime.datetime.now().strftime("%B %d, %Y")
+    st.markdown(f"<div style='text-align: right; color: #666; margin-bottom: 20px;'>{current_date}</div>", 
+                unsafe_allow_html=True)
     
-    st.session_state.autosave_timer = threading.Timer(2.0, callback, args=args, kwargs=kwargs)
-    st.session_state.autosave_timer.daemon = True
-    st.session_state.autosave_timer.start()
-    st.session_state.last_input_time = time.time()
-
-def generate_sequential_code(prefix: str) -> str:
-    """Generate a sequential code with format PREFIX-YYYYMMDD-XXXX."""
-    today = datetime.datetime.now().strftime("%Y%m%d")
+    # Welcome header with custom styling
+    st.markdown("<div class='welcome-message'>Welcome, Pofisian! 👋</div>", unsafe_allow_html=True)
     
-    # Find the highest number used today
-    regex_pattern = f"^{prefix}-{today}-"
-    highest_doc = db[f"{prefix.lower()}s"].find_one(
-        {"code": {"$regex": regex_pattern}},
-        sort=[("code", pymongo.DESCENDING)]
-    )
+    # Show summary statistics
+    st.header("Service Overview")
     
-    if highest_doc:
-        # Extract the number and increment
-        try:
-            number = int(highest_doc["code"].split("-")[-1]) + 1
-        except (ValueError, IndexError):
-            number = 1
-    else:
-        number = 1
+    # Calculate statistics
+    total_customers = customers.count_documents({})
+    total_machines = sum([c.get('machine_count', 0) for c in customers.find({}, {"machine_count": 1})])
+    
+    # Calculate completion statistics
+    completion_stats = {
+        "Complete": 0,
+        "In Progress": 0,
+        "Not Started": 0
+    }
+    
+    for cust in customers.find({}, {"status": 1}):
+        status = cust.get('status', {})
+        completed_steps = sum([
+            status.get('vendor_registered', False),
+            status.get('mrn_created', False),
+            status.get('service_report_created', False),
+            status.get('telecontroller_done', False)
+        ])
         
-    return f"{prefix}-{today}-{number:04d}"
-
-# Main app structure
-st.title("Service Workflow Application")
-
-# Page 1: CRM Entry
-if st.session_state.page == 1:
-    st.header("New Service Visit")
+        if completed_steps == 4:
+            completion_stats["Complete"] += 1
+        elif completed_steps > 0:
+            completion_stats["In Progress"] += 1
+        else:
+            completion_stats["Not Started"] += 1
     
-    # Input fields
-    company_name = st.text_input("Company name", key="company_name")
-    contact_name = st.text_input("Procurement contact name", key="contact_name")
-    contact_phone = st.text_input("Procurement contact phone", key="contact_phone")
-    machine_count = st.number_input("Number of machines", min_value=0, step=1, key="machine_count")
+    # Display metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-value">{}</div>
+            <div class="metric-label">Total Clients</div>
+        </div>
+        """.format(total_customers), unsafe_allow_html=True)
+    with col2:
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-value">{}</div>
+            <div class="metric-label">Total Machines Under Service</div>
+        </div>
+        """.format(total_machines), unsafe_allow_html=True)
+    with col3:
+        avg_machines = round(total_machines / total_customers, 1) if total_customers > 0 else 0
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-value">{}</div>
+            <div class="metric-label">Avg. Machines per Client</div>
+        </div>
+        """.format(avg_machines), unsafe_allow_html=True)
     
-    # Autosave function for CRM entry
-    def save_customer_data():
-        customer_data = {
-            "name": company_name,
-            "contact_name": contact_name,
-            "contact_phone": contact_phone,
-            "machine_count": machine_count,
-            "created_at": datetime.datetime.now(),
-            "status": {
-                "vendor_registered": False,
-                "mrn_created": False,
-                "service_report_created": False,
-                "telecontroller_done": False
-            }
+    # Add a visual representation of completion status using a chart
+    if total_customers > 0:
+        st.subheader("Service Completion Status")
+        
+        # Create a simple bar chart to visualize completion status
+        chart_data = {
+            "Status": list(completion_stats.keys()),
+            "Count": list(completion_stats.values())
         }
         
-        # If customer_id exists, update; otherwise insert
-        if st.session_state.customer_id:
-            customers.update_one(
-                {"_id": ObjectId(st.session_state.customer_id)}, 
-                {"$set": customer_data}
-            )
-        else:
-            result = customers.insert_one(customer_data)
-            st.session_state.customer_id = str(result.inserted_id)
+        # Add some styling to the chart
+        st.bar_chart(chart_data, x="Status", y="Count", color="#FF5733")
+        
+        # Add a pie chart showing percentage breakdown
+        try:
+            import pandas as pd
+            import plotly.express as px
             
-        st.toast("Customer data saved", icon="✅")
+            df = pd.DataFrame({
+                "Status": list(completion_stats.keys()),
+                "Count": list(completion_stats.values())
+            })
+            
+            if sum(df["Count"]) > 0:
+                fig = px.pie(df, values="Count", names="Status", 
+                            title="Service Workflows Status Distribution",
+                            color_discrete_sequence=["#28a745", "#ffc107", "#dc3545"])
+                st.plotly_chart(fig, use_container_width=True)
+        except ImportError:
+            # Fallback if plotly is not available
+            st.write("Status breakdown:", completion_stats)
     
-    # Set up input change detection for autosave
-    for key in ["company_name", "contact_name", "contact_phone", "machine_count"]:
-        if key in st.session_state:
-            reset_autosave_timer(save_customer_data)
+    # Show dashboard with client info
+    st.subheader("Client Overview")
     
-    # Next button
-    if st.button("Next", key="next_to_vendor_registration"):
-        if not st.session_state.customer_id:
-            # If no autosave happened yet, save immediately
-            save_customer_data()
-        navigate_to_page(2)
-
-# Page 2: Vendor Registration
-elif st.session_state.page == 2:
-    st.header("Vendor Registration")
-    
-    # Load customer data
-    if st.session_state.customer_id:
-        customer = customers.find_one({"_id": ObjectId(st.session_state.customer_id)})
-        if customer:
-            st.write(f"Company: {customer['name']}")
-            
-            # Vendor registered checkbox
-            vendor_registered = st.checkbox(
-                "Vendor is registered", 
-                value=customer['status'].get('vendor_registered', False),
-                key="vendor_registered"
-            )
-            
-            # Save function for vendor registration
-            def save_vendor_status(status):
-                customers.update_one(
-                    {"_id": ObjectId(st.session_state.customer_id)},
-                    {"$set": {"status.vendor_registered": status}}
-                )
-                st.toast("Vendor status updated", icon="✅")
-            
-            # Check if checkbox was changed
-            if "vendor_registered" in st.session_state and st.session_state.vendor_registered != customer['status'].get('vendor_registered', False):
-                save_vendor_status(vendor_registered)
-            
-            # Next button (only enabled when vendor is registered)
-            next_disabled = not vendor_registered
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("Previous", key="prev_to_crm"):
-                    navigate_to_page(1)
-            with col2:
-                if st.button("Next", key="next_to_mrn", disabled=next_disabled):
-                    navigate_to_page(3)
-        else:
-            st.error("Customer data not found. Please go back and retry.")
-            if st.button("Back to CRM Entry"):
-                navigate_to_page(1)
-    else:
-        st.error("No customer selected. Please start from the beginning.")
-        if st.button("Back to CRM Entry"):
-            navigate_to_page(1)
-
-# Page 3: MRN Creation
-elif st.session_state.page == 3:
-    st.header("Create MRN")
-    
-    # Load customer data
-    if st.session_state.customer_id:
-        customer = customers.find_one({"_id": ObjectId(st.session_state.customer_id)})
-        if customer:
-            # Display customer info
-            st.write(f"Company: {customer['name']}")
-            st.write(f"Contact: {customer['contact_name']}")
-            st.write(f"Machines: {customer['machine_count']}")
-            
-            # Check if MRN already exists
-            existing_mrn = mrns.find_one({"customer_id": st.session_state.customer_id})
-            
-            if existing_mrn:
-                st.session_state.mrn_code = existing_mrn['mrn_code']
-                st.success(f"MRN already generated: {st.session_state.mrn_code}")
-                st.button("Next", key="next_to_service_report", on_click=lambda: navigate_to_page(4))
-            else:
-                # Generate MRN button
-                if st.button("Generate MRN", key="generate_mrn"):
-                    # Generate MRN code
-                    mrn_code = generate_sequential_code("MRN")
-                    
-                    # Create MRN document
-                    mrn_data = {
-                        "customer_id": st.session_state.customer_id,
-                        "mrn_code": mrn_code,
-                        "created_at": datetime.datetime.now(),
-                        "code": mrn_code  # To help with the sequential code search
-                    }
-                    mrns.insert_one(mrn_data)
-                    
-                    # Update customer status
-                    customers.update_one(
-                        {"_id": ObjectId(st.session_state.customer_id)},
-                        {"$set": {
-                            "status.mrn_created": True,
-                            "mrn_code": mrn_code
-                        }}
-                    )
-                    
-                    st.session_state.mrn_code = mrn_code
-                    st.success(f"MRN Generated: {mrn_code}")
-                    st.button("Next", key="next_to_service_report_after_generate", on_click=lambda: navigate_to_page(4))
-            
-            # Previous button
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("Previous", key="prev_to_vendor"):
-                    navigate_to_page(2)
-        else:
-            st.error("Customer data not found. Please go back and retry.")
-            if st.button("Back to CRM Entry"):
-                navigate_to_page(1)
-    else:
-        st.error("No customer selected. Please start from the beginning.")
-        if st.button("Back to CRM Entry"):
-            navigate_to_page(1)
-
-# Page 4: Service Report
-elif st.session_state.page == 4:
-    st.header("Service Report")
-    
-    # Load customer and MRN data
-    if st.session_state.customer_id and st.session_state.mrn_code:
-        # Display MRN
-        st.write(f"MRN Code: {st.session_state.mrn_code}")
-        
-        # Check if service report already exists
-        existing_report = service_reports.find_one({"customer_id": st.session_state.customer_id})
-        
-        # Initialize inputs with existing data if available
-        service_date_default = existing_report.get('service_date') if existing_report else datetime.datetime.now()
-        issues_default = existing_report.get('issues_found', '') if existing_report else ''
-        actions_default = existing_report.get('actions_taken', '') if existing_report else ''
-        
-        # Input fields
-        service_date = st.date_input("Service date", value=service_date_default, key="service_date")
-        issues_found = st.text_area("Issues found", value=issues_default, key="issues_found")
-        actions_taken = st.text_area("Actions taken", value=actions_default, key="actions_taken")
-        
-        # Autosave function for service report
-        def save_service_report():
-            # Convert date to datetime
-            service_datetime = datetime.datetime.combine(service_date, datetime.time())
-            
-            report_data = {
-                "customer_id": st.session_state.customer_id,
-                "mrn_code": st.session_state.mrn_code,
-                "service_date": service_datetime,
-                "issues_found": issues_found,
-                "actions_taken": actions_taken,
-                "updated_at": datetime.datetime.now()
-            }
-            
-            if existing_report:
-                # Update existing report
-                service_reports.update_one(
-                    {"_id": existing_report["_id"]},
-                    {"$set": report_data}
-                )
-                st.toast("Service report updated", icon="✅")
-                
-                # Ensure we have the sr_code in session state
-                st.session_state.sr_code = existing_report.get("sr_code")
-            else:
-                # Generate SR code
-                sr_code = generate_sequential_code("SR")
-                report_data["sr_code"] = sr_code
-                report_data["created_at"] = datetime.datetime.now()
-                report_data["code"] = sr_code  # For sequential code generation
-                
-                # Insert new report
-                service_reports.insert_one(report_data)
-                
-                # Update customer status
-                customers.update_one(
-                    {"_id": ObjectId(st.session_state.customer_id)},
-                    {"$set": {
-                        "status.service_report_created": True,
-                        "sr_code": sr_code
-                    }}
-                )
-                
-                st.session_state.sr_code = sr_code
-                st.toast("Service report created", icon="✅")
-        
-        # Set up input change detection for autosave
-        for key in ["service_date", "issues_found", "actions_taken"]:
-            if key in st.session_state:
-                reset_autosave_timer(save_service_report)
-        
-        # Navigation buttons
-        col1, col2 = st.columns([1, 5])
+    # Advanced filter options
+    st.subheader("Filter Options")
+    with st.expander("Advanced Filters", expanded=False):
+        col1, col2 = st.columns(2)
         with col1:
-            if st.button("Previous", key="prev_to_mrn"):
-                navigate_to_page(3)
+            show_incomplete = st.checkbox("Show only incomplete records", value=False)
         with col2:
-            if st.button("Next", key="next_to_telecontroller"):
-                # Make sure we save before moving on
-                save_service_report()
-                navigate_to_page(5)
-    else:
-        st.error("MRN not generated. Please complete the previous steps.")
-        if st.button("Back to MRN Creation"):
-            navigate_to_page(3)
-
-# Page 5: Telecontroller Step
-elif st.session_state.page == 5:
-    st.header("Telecontroller")
+            show_complete = st.checkbox("Show only complete records", value=False)
+        
+        # Filter by date range
+        st.write("Filter by creation date:")
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            start_date = st.date_input("Start date", value=None)
+        with date_col2:
+            end_date = st.date_input("End date", value=None)
+        
+        # Search by company name
+        search_term = st.text_input("Search by company name", "")
     
-    # Load customer data
-    if st.session_state.customer_id:
-        customer = customers.find_one({"_id": ObjectId(st.session_state.customer_id)})
-        if customer:
-            # Display customer info
-            st.write(f"Company: {customer['name']}")
-            
-            # Check telecontroller status
-            telecontroller_done = customer['status'].get('telecontroller_done', False)
-            
-            # Radio button for telecontroller status
-            telecontroller_option = st.radio(
-                "Have you filled the telecontroller?",
-                ("No", "Yes"),
-                index=1 if telecontroller_done else 0,
-                key="telecontroller_option"
-            )
-            
-            if telecontroller_option == "Yes":
-                # Show file uploader if yes
-                uploaded_file = st.file_uploader("Upload telecontroller PDF", type="pdf")
-                
-                if uploaded_file is not None:
-                    # Save file to GridFS
-                    file_id = fs.put(
-                        uploaded_file.getvalue(), 
-                        filename=uploaded_file.name,
-                        customer_id=st.session_state.customer_id,
-                        content_type="application/pdf"
-                    )
-                    
-                    # Update customer status
-                    customers.update_one(
-                        {"_id": ObjectId(st.session_state.customer_id)},
-                        {"$set": {
-                            "status.telecontroller_done": True,
-                            "telecontroller_file_id": str(file_id)
-                        }}
-                    )
-                    
-                    st.success("Telecontroller PDF uploaded successfully")
-                    telecontroller_done = True
-                
-                elif telecontroller_done:
-                    st.success("Telecontroller already completed")
-            else:
-                # Show link to external site
-                st.markdown("[Go to external telecontroller site](https://external-telecontroller-site.com)")
-            
-            # Navigation buttons
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("Previous", key="prev_to_service_report"):
-                    navigate_to_page(4)
-            with col2:
-                if st.button("Next", key="next_to_dashboard", disabled=not telecontroller_done):
-                    navigate_to_page(6)
-        else:
-            st.error("Customer data not found. Please go back and retry.")
-            if st.button("Back to Service Report"):
-                navigate_to_page(4)
-    else:
-        st.error("No customer selected. Please start from the beginning.")
-        if st.button("Back to CRM Entry"):
-            navigate_to_page(1)
-
-# Page 6: Dashboard
-elif st.session_state.page == 6:
-    st.header("Overview Dashboard")
+    # Sorting options
+    sort_options = {
+        "Company Name (A-Z)": ("name", 1),
+        "Company Name (Z-A)": ("name", -1),
+        "Newest First": ("created_at", -1),
+        "Oldest First": ("created_at", 1),
+        "Most Machines": ("machine_count", -1),
+        "Fewest Machines": ("machine_count", 1),
+        "Highest Completion": ("completion_score", -1),
+        "Lowest Completion": ("completion_score", 1)
+    }
     
-    # Filter options
-    st.subheader("Filters")
-    show_incomplete = st.checkbox("Show only incomplete records", value=False)
+    sort_by = st.selectbox("Sort by:", options=list(sort_options.keys()))
+    sort_field, sort_direction = sort_options[sort_by]
     
     # Query parameters
     query = {}
-    if show_incomplete:
+    
+    # Handle filter logic
+    if show_incomplete and show_complete:
+        # If both are checked, show all (no filter)
+        pass
+    elif show_incomplete:
         query["$or"] = [
             {"status.vendor_registered": False},
             {"status.mrn_created": False},
             {"status.service_report_created": False},
             {"status.telecontroller_done": False}
         ]
+    elif show_complete:
+        query["$and"] = [
+            {"status.vendor_registered": True},
+            {"status.mrn_created": True},
+            {"status.service_report_created": True},
+            {"status.telecontroller_done": True}
+        ]
     
-    # Get all customers matching the query
-    all_customers = list(customers.find(query))
+    # Date range filtering
+    if start_date or end_date:
+        date_query = {}
+        if start_date:
+            date_query["$gte"] = datetime.datetime.combine(start_date, datetime.time.min)
+        if end_date:
+            date_query["$lte"] = datetime.datetime.combine(end_date, datetime.time.max)
+        if date_query:
+            query["created_at"] = date_query
+    
+    # Company name search
+    if search_term:
+        query["name"] = {"$regex": search_term, "$options": "i"}  # Case-insensitive search
+    
+    # Get all customers matching the query with sorting
+    all_customers = list(customers.find(query).sort(sort_field, sort_direction))
+    
+    # Filter by machine serial number (search in MRNs)
+    serial_search = st.text_input("Search by machine serial number:", "")
+    if serial_search.strip():
+        from database.connection import mrns
+        # Find MRNs with matching serial numbers
+        matching_mrns = list(mrns.find({"serial_no": {"$regex": serial_search, "$options": "i"}}))
+        if matching_mrns:
+            # Get customer IDs from matching MRNs
+            customer_ids = [mrn.get("customer_id") for mrn in matching_mrns]
+            # Filter customers to only those with matching MRNs
+            all_customers = [c for c in all_customers if str(c.get("_id")) in customer_ids]
+            st.success(f"Found {len(all_customers)} customer(s) with machines matching serial number pattern: {serial_search}")
+        else:
+            st.info(f"No machines found with serial number matching: {serial_search}")
+            all_customers = []
     
     # Prepare data for dataframe
     dashboard_data = []
@@ -444,12 +248,17 @@ elif st.session_state.page == 6:
             "SR": f"✓ ({cust.get('sr_code', '')})" if status.get('service_report_created', False) else "❌",
             "Telecontroller": "✓" if status.get('telecontroller_done', False) else "❌",
             "Completion": f"{completion_percentage:.0f}%",
+            "Actions": "🔍📝",  # Edit/View action icons
             "_id": str(cust.get('_id', ''))
         })
     
     # Display dataframe
     if dashboard_data:
-        df = st.dataframe(
+        # Create a selection mechanism
+        st.markdown("**Click on any row to continue or view that workflow**")
+        
+        # Create the dataframe with selection
+        selection = st.dataframe(
             dashboard_data,
             column_config={
                 "_id": None,  # Hide the ID column
@@ -459,30 +268,232 @@ elif st.session_state.page == 6:
                     format="%d%%",
                     min_value=0,
                     max_value=100
+                ),
+                "Actions": st.column_config.Column(
+                    "Actions",
+                    help="View or edit customer data",
+                    width="small"
                 )
             },
-            hide_index=True
+            hide_index=True,
+            use_container_width=True
         )
         
-        # Allow clicking on a row to edit that customer
-        if st.button("Create New Service Visit"):
-            st.session_state.customer_id = None
-            st.session_state.mrn_code = None
-            st.session_state.sr_code = None
-            navigate_to_page(1)
+        # Add a row selection mechanism for editing/viewing
+        st.markdown("### View or Edit Customer Data")
+        customer_for_edit = st.selectbox(
+            "Select a customer to view or edit:",
+            range(len(dashboard_data)),
+            format_func=lambda i: dashboard_data[i]["Company"] if i < len(dashboard_data) else ""
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔍 View Customer Data", key="view_customer_data", use_container_width=True):
+                if customer_for_edit is not None and customer_for_edit < len(dashboard_data):
+                    selected_customer_id = dashboard_data[customer_for_edit]["_id"]
+                    st.session_state.view_customer_id = selected_customer_id
+                    st.session_state.customer_view_mode = "view"
+                    st.session_state.page = "customer_view"
+                    st.rerun()
+        
+        with col2:
+            if st.button("📝 Edit Customer Data", key="edit_customer_data", use_container_width=True):
+                if customer_for_edit is not None and customer_for_edit < len(dashboard_data):
+                    selected_customer_id = dashboard_data[customer_for_edit]["_id"]
+                    st.session_state.view_customer_id = selected_customer_id
+                    st.session_state.customer_view_mode = "edit"
+                    st.session_state.page = "customer_view"
+                    st.rerun()
+        
+        # Add timeline visualization for selected customer
+        if dashboard_data:
+            st.subheader("Service Workflow Timeline View")
+            selected_customer_index = st.selectbox(
+                "Select a customer to view their service timeline:",
+                range(len(dashboard_data)),
+                format_func=lambda i: dashboard_data[i]["Company"] if i < len(dashboard_data) else ""
+            )
+            
+            if selected_customer_index is not None and selected_customer_index < len(dashboard_data):
+                selected_customer_id = dashboard_data[selected_customer_index]["_id"]
+                selected_customer = customers.find_one({"_id": ObjectId(selected_customer_id)})
+                
+                if selected_customer:
+                    # Display service timeline
+                    # Using datetime module that's already imported at the top of the file
+                    
+                    # Get all dates from database
+                    timeline_data = {
+                        "CRM Entry": selected_customer.get("created_at", datetime.datetime.now()),
+                    }
+                    
+                    # Get vendor registration date (need to query historical data)
+                    # For now just use a placeholder
+                    if selected_customer['status'].get('vendor_registered', False):
+                        timeline_data["Vendor Registration"] = selected_customer.get("vendor_registered_at", timeline_data["CRM Entry"])
+                    
+                    # Get MRN date from mrns collection
+                    from database.connection import mrns
+                    mrn_record = mrns.find_one({"customer_id": selected_customer_id, "is_draft": {"$ne": True}})
+                    if mrn_record:
+                        timeline_data["MRN Creation"] = mrn_record.get("created_at", timeline_data["CRM Entry"])
+                    
+                    # Get Service Report date
+                    from database.connection import service_reports
+                    sr_record = service_reports.find_one({"customer_id": selected_customer_id})
+                    if sr_record:
+                        timeline_data["Service Report"] = sr_record.get("created_at", timeline_data["CRM Entry"])
+                    
+                    # Telecontroller date
+                    if selected_customer['status'].get('telecontroller_done', False):
+                        timeline_data["Telecontroller"] = selected_customer.get("telecontroller_done_at", timeline_data["CRM Entry"])
+                    
+                    # Create a timeline visualization
+                    import pandas as pd
+                    
+                    # Convert to list of dicts for display
+                    timeline_list = []
+                    for stage, date in timeline_data.items():
+                        # Convert date to string for display
+                        if isinstance(date, datetime.datetime):
+                            date_str = date.strftime("%Y-%m-%d %H:%M")
+                        else:
+                            date_str = str(date)
+                        
+                        timeline_list.append({
+                            "Stage": stage,
+                            "Date": date_str
+                        })
+                    
+                    # Create a DataFrame
+                    timeline_df = pd.DataFrame(timeline_list)
+                    
+                    # Display as table with custom formatting
+                    st.table(timeline_df)
+                    
+                    # Add a service completion time calculation
+                    if len(timeline_data) > 1 and "Telecontroller" in timeline_data:
+                        start_date = timeline_data["CRM Entry"]
+                        end_date = timeline_data["Telecontroller"]
+                        
+                        if isinstance(start_date, datetime.datetime) and isinstance(end_date, datetime.datetime):
+                            service_time = end_date - start_date
+                            days = service_time.days
+                            hours = service_time.seconds // 3600
+                            
+                            st.success(f"Total service completion time: {days} days and {hours} hours")
+        
+        # Below the dataframe, add buttons for each customer
+        st.markdown("### Continue Workflow")
+        st.markdown("Select a customer to continue their workflow:")
+        
+        # Create a selectbox with customer names
+        customer_options = [f"{cust['Company']} ({cust['Completion']} complete)" for cust in dashboard_data]
+        customer_index = st.selectbox("Select customer:", 
+                                       options=range(len(customer_options)),
+                                       format_func=lambda i: customer_options[i] if i < len(customer_options) else "")
+        
+        if st.button("Continue Selected Workflow", use_container_width=True):
+            if customer_index is not None and customer_index < len(dashboard_data):
+                selected_customer_id = dashboard_data[customer_index]["_id"]
+                
+                # Set customer ID in session state
+                st.session_state.customer_id = selected_customer_id
+                
+                # Get customer data
+                customer = customers.find_one({"_id": ObjectId(selected_customer_id)})
+                
+                # Determine which page to navigate to based on workflow progress
+                if not customer['status'].get('vendor_registered', False):
+                    navigate_to_page("vendor_registration")
+                elif not customer['status'].get('mrn_created', False):
+                    navigate_to_page("mrn_creation")
+                elif not customer['status'].get('service_report_created', False):
+                    navigate_to_page("service_report")
+                elif not customer['status'].get('telecontroller_done', False):
+                    navigate_to_page("telecontroller")
+                else:
+                    # If all steps are complete, just stay on the dashboard
+                    st.success(f"Workflow for {customer.get('name', 'Unknown')} is already complete!")
+                    
+                # Get MRN code if exists
+                if customer.get('mrn_code'):
+                    st.session_state.mrn_code = customer.get('mrn_code')
+                    
+                # Get SR code if exists
+                if customer.get('sr_code'):
+                    st.session_state.sr_code = customer.get('sr_code')
+        
     else:
         st.info("No records found matching the filter criteria.")
-        if st.button("Create New Service Visit"):
+    
+    # Create new service visit button with better styling
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Create a card-like container for the button
+    st.markdown("""
+    <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; text-align: center; margin-top: 20px;">
+        <h3>Start a New Service Workflow</h3>
+        <p>Click below to begin a new customer service workflow</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([3, 2, 3])
+    with col2:
+        if st.button("✨ Create New Service Visit", key="create_new_visit", use_container_width=True):
+            # Reset session state for a new customer
             st.session_state.customer_id = None
             st.session_state.mrn_code = None
             st.session_state.sr_code = None
-            navigate_to_page(1)
-
-# Handle cleanup of timer when app reruns
-def cleanup():
-    if hasattr(st.session_state, 'autosave_timer') and st.session_state.autosave_timer:
-        st.session_state.autosave_timer.cancel()
-
-# Register cleanup handler
-import atexit
-atexit.register(cleanup)
+            
+            # Create a temporary customer record to ensure we have an ID
+            temp_customer_data = {
+                "name": "New Customer",
+                "contact_name": "",
+                "contact_phone": "",
+                "machine_count": 0,
+                "created_at": datetime.datetime.now(),
+                "is_temporary": True,  # Flag to identify this as a new record
+                "status": {
+                    "vendor_registered": False,
+                    "mrn_created": False,
+                    "service_report_created": False,
+                    "telecontroller_done": False
+                }
+            }
+            
+            # Insert the temporary customer and store the ID
+            result = customers.insert_one(temp_customer_data)
+            st.session_state.customer_id = str(result.inserted_id)
+            
+            # Reset any other form input values that might be in session state
+            if "company_name" in st.session_state:
+                del st.session_state.company_name
+            if "contact_name" in st.session_state:
+                del st.session_state.contact_name
+            if "contact_phone" in st.session_state:
+                del st.session_state.contact_phone
+            if "machine_count" in st.session_state:
+                del st.session_state.machine_count
+            
+            # Show a success message
+            st.toast("New customer record created. Please fill in the details.", icon="✅")
+            
+            # Navigate to the CRM entry page
+            navigate_to_page("crm_entry")
+            st.rerun()
+              
+# Render other pages based on the current page in session state
+elif st.session_state.page == "crm_entry":
+    crm_entry.render()
+elif st.session_state.page == "vendor_registration":
+    vendor_registration.render()
+elif st.session_state.page == "mrn_creation":
+    mrn_creation.render()
+elif st.session_state.page == "service_report":
+    service_report.render()
+elif st.session_state.page == "telecontroller":
+    telecontroller.render()
+elif st.session_state.page == "customer_view":
+    customer_view.render()
