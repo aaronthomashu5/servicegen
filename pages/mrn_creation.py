@@ -14,7 +14,7 @@ def render():
     # Instructions in a card
     st.markdown("""
     <div class="css-card">
-        <h3>Machine Receival Number</h3>
+        <h3>Material Return Number</h3>
         <p>Complete this form to record details of the received machine and generate a Material Return Number (MRN).</p>
     </div>
     """, unsafe_allow_html=True)
