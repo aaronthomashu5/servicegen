@@ -1,0 +1,285 @@
+import streamlit as st
+import datetime
+import pandas as pd
+from bson.objectid import ObjectId
+from utils.helpers import navigate_to_page, reset_autosave_timer, generate_sequential_code, create_workflow_steps_indicator, validate_phone_number, validate_email
+from database.connection import customers, service_reports, mrns
+
+def render():
+    # Display workflow steps indicator
+    create_workflow_steps_indicator("service_report")
+    
+    st.header("Service Report")
+    
+    # Instructions in a card
+    st.markdown("""
+    <div class="css-card">
+        <h3>Detailed Service Documentation</h3>
+        <p>Document the complete service performed, parts used, and customer acceptance.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Load customer and MRN data
+    if st.session_state.customer_id and st.session_state.mrn_code:
+        # Display MRN
+        st.write(f"MRN Code: {st.session_state.mrn_code}")
+        
+        # Get customer data for auto-filling
+        customer = customers.find_one({"_id": ObjectId(st.session_state.customer_id)})
+        # Get MRN data for prefilling machine details
+        mrn_data = mrns.find_one({"customer_id": st.session_state.customer_id, "is_draft": {"$ne": True}})
+        
+        # Check if service report already exists
+        existing_report = service_reports.find_one({"customer_id": st.session_state.customer_id})
+        
+        # Create tabs for better organization of the form
+        tab1, tab2, tab3, tab4 = st.tabs(["Basic Information", "Job Details", "Parts & Materials", "Signatures"])
+        
+        with tab1:
+            st.subheader("Service Report Information")
+            
+            # Date field with format DD/MM/YYYY
+            service_date = st.date_input(
+                "Date", 
+                value=existing_report.get('service_date', datetime.datetime.now()) if existing_report else datetime.datetime.now(),
+                format="DD/MM/YYYY",
+                key="service_date"
+            )
+            
+            # Customer information (auto-filled but editable)
+            customer_name = st.text_input(
+                "Customer Name", 
+                value=customer.get('name', '') if customer else '',
+                key="customer_name"
+            )
+            
+            contact_number = st.text_input(
+                "Contact Number", 
+                value=customer.get('contact_phone', '') if customer else '',
+                key="contact_number"
+            )
+            
+            # Validate phone number format
+            if contact_number and not validate_phone_number(contact_number):
+                st.warning("Please enter a valid phone number")
+            
+            email_id = st.text_input(
+                "Email ID", 
+                value=customer.get('email', '') if customer else '',
+                key="email_id"
+            )
+            
+            # Validate email format
+            if email_id and not validate_email(email_id):
+                st.warning("Please enter a valid email address")
+            
+            # Machine information
+            st.subheader("Machine Information")
+            
+            # Auto-fill from MRN if available
+            type_of_machine = st.text_input(
+                "Type Of Machine", 
+                value=mrn_data.get('machine_type', '') if mrn_data else '',
+                key="type_of_machine"
+            )
+            
+            # MRN code (display only)
+            st.text_input(
+                "MRN", 
+                value=st.session_state.mrn_code,
+                disabled=True,
+                key="mrn_display"
+            )
+            
+            # Job Card Number
+            jc_no = st.text_input(
+                "JC No.", 
+                value=existing_report.get('jc_no', '') if existing_report else '',
+                key="jc_no"
+            )
+            
+            # Types of Service (checkboxes)
+            st.subheader("Type of Service")
+            col1, col2 = st.columns(2)
+            with col1:
+                ws_selected = st.checkbox(
+                    "WS (Warranty Service)", 
+                    value=existing_report.get('service_type_ws', False) if existing_report else False,
+                    key="service_type_ws"
+                )
+            with col2:
+                gs_selected = st.checkbox(
+                    "GS (General Service)", 
+                    value=existing_report.get('service_type_gs', False) if existing_report else False,
+                    key="service_type_gs"
+                )
+            
+            # Additional service types
+            other_service_types = st.multiselect(
+                "Other Service Types",
+                ["Scheduled Maintenance", "Repair", "Installation", "Training", "Inspection", "Other"],
+                default=existing_report.get('other_service_types', []) if existing_report else [],
+                key="other_service_types"
+            )
+            
+            # Machine details
+            make_model = st.text_input(
+                "Make & Model", 
+                value=mrn_data.get('model', '') if mrn_data else '',
+                key="make_model"
+            )
+            
+            serial_number = st.text_input(
+                "Serial Number", 
+                value=mrn_data.get('serial_no', '') if mrn_data else '',
+                key="serial_number"
+            )
+            
+            running_hours = st.number_input(
+                "Running Hours", 
+                min_value=0, 
+                value=existing_report.get('running_hours', 0) if existing_report else 0,
+                key="running_hours"
+            )
+        
+        with tab2:
+            st.subheader("Service Details")
+            
+            # Reported fault
+            reported_fault = st.text_area(
+                "Reported Fault", 
+                value=existing_report.get('reported_fault', '') if existing_report else (mrn_data.get('problem_reported', '') if mrn_data else ''),
+                height=100,
+                key="reported_fault"
+            )
+                height=100,
+                key="reported_fault"
+            )
+            
+            # Job carried out
+            job_carried_out = st.text_area(
+                "Job Carried Out", 
+                value=existing_report.get('job_carried_out', '') if existing_report else '',
+                height=150,
+                key="job_carried_out"
+            )
+            
+            # Staff assigned section
+            st.subheader("Staff Assigned / Job Details")
+            
+            # Initialize staff list if not in session state
+            if "staff_list" not in st.session_state:
+                if existing_report and "staff_assigned" in existing_report:
+                    st.session_state.staff_list = existing_report.get('staff_assigned', [])
+                else:
+                    st.session_state.staff_list = [{}]  # Start with one empty entry
+            
+            # Function to add a new staff entry
+            def add_staff_entry():
+                st.session_state.staff_list.append({})
+            
+            # Function to remove a staff entry
+            def remove_staff_entry(index):
+                if len(st.session_state.staff_list) > 1:  # Keep at least one entry
+                    st.session_state.staff_list.pop(index)
+            
+            # Display each staff entry
+            for i, staff_entry in enumerate(st.session_state.staff_list):
+                with st.container():
+                    st.markdown(f"**Staff Entry #{i+1}**")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        staff_entry['name'] = st.text_input(
+                            "Staff Assigned", 
+                            value=staff_entry.get('name', ''),
+                            key=f"staff_name_{i}"
+                        )
+                        
+                        staff_entry['service_date'] = st.date_input(
+                            "Service Date", 
+                            value=datetime.datetime.strptime(staff_entry.get('service_date', datetime.datetime.now().strftime('%Y-%m-%d')), '%Y-%m-%d').date() 
+                                if isinstance(staff_entry.get('service_date', ''), str) and staff_entry.get('service_date', '') 
+                                else datetime.datetime.now(),
+                            key=f"staff_service_date_{i}"
+                        )
+                        
+                        staff_entry['travel_time'] = st.text_input(
+                            "Travel Time (hours)", 
+                            value=staff_entry.get('travel_time', ''),
+                            key=f"staff_travel_time_{i}"
+                        )
+                    
+                    with col2:
+                        # Job start and end times
+                        staff_entry['job_start'] = st.time_input(
+                            "Job Start", 
+                            value=datetime.datetime.strptime(staff_entry.get('job_start', '09:00'), '%H:%M').time() 
+                                if isinstance(staff_entry.get('job_start', ''), str) and staff_entry.get('job_start', '') 
+                                else datetime.time(9, 0),
+                            key=f"staff_job_start_{i}"
+                        )
+                        
+                        staff_entry['job_end'] = st.time_input(
+                            "Job End", 
+                            value=datetime.datetime.strptime(staff_entry.get('job_end', '17:00'), '%H:%M').time() 
+                                if isinstance(staff_entry.get('job_end', ''), str) and staff_entry.get('job_end', '') 
+                                else datetime.time(17, 0),
+                            key=f"staff_job_end_{i}"
+                        )
+                        
+                        staff_entry['job_status'] = st.selectbox(
+                            "Job Status", 
+                            options=["Completed", "In Progress", "Pending", "Cancelled"],
+                            index=["Completed", "In Progress", "Pending", "Cancelled"].index(staff_entry.get('job_status', 'Completed')) 
+                                if staff_entry.get('job_status', '') in ["Completed", "In Progress", "Pending", "Cancelled"] 
+                                else 0,
+                            key=f"staff_job_status_{i}"
+                        )
+                    
+                    staff_entry['job_type'] = st.selectbox(
+                        "Job Type", 
+                        options=["Repair", "Maintenance", "Installation", "Training", "Inspection", "Other"],
+                        index=["Repair", "Maintenance", "Installation", "Training", "Inspection", "Other"].index(staff_entry.get('job_type', 'Repair')) 
+                            if staff_entry.get('job_type', '') in ["Repair", "Maintenance", "Installation", "Training", "Inspection", "Other"] 
+                            else 0,
+                        key=f"staff_job_type_{i}"
+                    )
+                    
+                    # Remove button for this entry
+                    if len(st.session_state.staff_list) > 1:  # Only show remove button if there's more than one entry
+                        if st.button("Remove Entry", key=f"remove_staff_{i}"):
+                            remove_staff_entry(i)
+                            st.rerun()
+                    
+                    st.markdown("---")
+            
+            # Button to add more staff entries
+            if st.button("Add Another Staff Entry", key="add_staff"):
+                add_staff_entry()
+                st.rerun()
+            
+            # Job status/customer comments
+            st.subheader("Job Status / Customer Comments")
+            job_status_comments = st.text_area(
+                "Customer Feedback and Status Notes", 
+                value=existing_report.get('job_status_comments', '') if existing_report else '',
+                height=100,
+                key="job_status_comments"
+            )
+        
+        # Navigation buttons
+        st.markdown("<br>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("← Previous", key="prev_to_mrn", use_container_width=True):
+                navigate_to_page("mrn_creation")
+        with col2:
+            if st.button("Next Step →", key="next_to_telecontroller", use_container_width=True):
+                # Make sure we save before moving on
+                save_service_report()
+                navigate_to_page("telecontroller")
+    else:
+        st.error("MRN not generated. Please complete the previous steps.")
+        if st.button("Back to MRN Creation"):
+            navigate_to_page("mrn_creation")
