@@ -1,7 +1,8 @@
 import streamlit as st
+import datetime
 from bson.objectid import ObjectId
 from utils.helpers import navigate_to_page, create_workflow_steps_indicator
-from database.connection import customers, fs
+from database.connection import customers
 
 def render():
     # Display workflow steps indicator
@@ -40,20 +41,19 @@ def render():
                 uploaded_file = st.file_uploader("Upload telecontroller PDF", type="pdf")
                 
                 if uploaded_file is not None:
-                    # Save file to GridFS
-                    file_id = fs.put(
-                        uploaded_file.getvalue(), 
-                        filename=uploaded_file.name,
-                        customer_id=st.session_state.customer_id,
-                        content_type="application/pdf"
-                    )
+                    # Save file information
+                    file_info = {
+                        "filename": uploaded_file.name,
+                        "content_type": "application/pdf",
+                        "upload_date": datetime.datetime.now()
+                    }
                     
-                    # Update customer status
+                    # Update customer status and file info
                     customers.update_one(
                         {"_id": ObjectId(st.session_state.customer_id)},
                         {"$set": {
                             "status.telecontroller_done": True,
-                            "telecontroller_file_id": str(file_id)
+                            "telecontroller_file_info": file_info
                         }}
                     )
                     

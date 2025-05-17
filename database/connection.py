@@ -1,5 +1,4 @@
 import pymongo
-# import gridfs
 import os
 import streamlit as st
 from typing import Dict, Any, Optional
@@ -34,7 +33,6 @@ def get_mongo_client():
 # Initialize MongoDB client and database
 client = get_mongo_client()
 db = client.service_workflow
-# fs = gridfs.GridFS(db)  # For file storage with GridFS
 
 # Collections
 customers = db.customers
