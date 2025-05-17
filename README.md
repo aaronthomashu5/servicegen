@@ -8,7 +8,7 @@ A comprehensive service management application built with Streamlit to streamlin
 - **Multi-step Workflow Process**:
   - Customer registration
   - Vendor verification
-  - MRN (Machine Receival Number) generation
+  - MRN (Material Return Number) generation
   - Service report documentation
   - Telecontroller completion
 - **Real-time Progress Tracking**: Visual step indicators and progress bars
